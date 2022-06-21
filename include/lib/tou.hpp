@@ -12,7 +12,6 @@ class TCP
     uint32_t ip;   // converted
     uint16_t port; // converted
     int sock;
-    int timerfd;
     sockaddr_in addr;
 
 public:
@@ -27,11 +26,6 @@ public:
 
     int send(const std::vector<char> &data);
     int recv(std::vector<char> &data);
-
-    int get_timerfd() const noexcept
-    {
-        return timerfd;
-    }
 };
 
 #endif

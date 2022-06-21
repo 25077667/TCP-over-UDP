@@ -1,7 +1,7 @@
 #include <tou.hpp>
 #include <ipaddr.hpp>
+#include <pkt_mgr.hpp>
 
-#include <sys/timerfd.h>
 #include <functional>
 #include <fcntl.h>
 #include <cstring>
@@ -18,39 +18,54 @@ namespace
 {
     namespace detail
     {
-        constexpr std::string fmtstr_ph_gen(auto &&arg)
+        template <auto N>
+        consteval auto to_array(const char (&l)[N])
         {
-            (void)arg; // ignore type
-            return "{} ";
+            std::array<char, N> ret{};
+            std::copy_n(l, N, ret.begin());
+            return ret;
+        }
+
+        template <auto N, auto M, typename... Rest>
+        consteval auto cat_static_str(const std::array<char, N> a, const std::array<char, M> b, Rest... rest)
+        {
+            // Take care of the null char
+            std::array<char, N + M - 1> ret{};
+            std::copy(a.cbegin(), a.cend() - 1, ret.begin());
+            std::copy(b.cbegin(), b.cend(), ret.begin() + N - 1);
+            if constexpr (sizeof...(Rest))
+                return cat_static_str(ret, rest...);
+            else
+                return ret;
+        }
+
+        template <typename Arg>
+        consteval auto fmtstr_ph_gen()
+        {
+            return to_array("{} ");
         }
 
         template <typename... Args>
-        constexpr std::string fmtstr_ph_gen(Args &&...args)
+        consteval auto err_fmtstr_gen()
         {
-            auto s = "{} " + fmtstr_ph_gen(std::forward<Args &&>(args)...);
-            return s;
-        }
-
-        template <typename... Args>
-        constexpr auto err_fmtstr_gen(Args &&...args)
-        {
-            auto s = "{} to " +
-                     fmtstr_ph_gen(std::forward<Args &&>(args)...) +
-                     "failed: {}";
-            return s;
+            return cat_static_str(
+                to_array("{} to "),
+                detail::fmtstr_ph_gen<Args>()...,
+                to_array("failed: {}"));
         }
     };
 
     template <typename... Args>
-    void try_exec(const char *func_name, std::function<int(void)> to_be_exec, Args... args)
+    void try_exec(const char *func_name, std::function<int(void)> to_be_exec, Args &&...args)
     {
         int _ = to_be_exec();
-        if (_ == -1)
+        if (_ == -1) [[unlikely]]
         {
-            std::string_view efs = detail::err_fmtstr_gen(std::forward<Args &&>(args)...);
-            throw std::runtime_error(fmt::format(efs, func_name, std::forward<Args &&>(args)..., std::strerror(_)));
+            static constexpr auto to_be_gen = detail::err_fmtstr_gen<Args...>();
+            throw std::runtime_error(fmt::format(to_be_gen.data(), func_name, args..., std::strerror(_)));
         }
     }
+
 };
 
 // Bind the 0.0.0.0
@@ -58,7 +73,6 @@ TCP::TCP(uint16_t port)
     : ip{0},
       port{::htons(port)},
       sock{::socket(AF_INET, SOCK_DGRAM, 0)},
-      timerfd{::timerfd_create(CLOCK_REALTIME, O_NONBLOCK)},
       addr{
           .sin_family = AF_INET,
           .sin_port = this->port,
@@ -74,7 +88,6 @@ TCP::TCP(const std::string &ip, uint16_t port)
     : ip{::inet_addr(ip.c_str())},
       port{::htons(port)},
       sock{::socket(AF_INET, SOCK_DGRAM, 0)},
-      timerfd{::timerfd_create(CLOCK_REALTIME, O_NONBLOCK)},
       addr{
           .sin_family = AF_INET,
           .sin_port = this->port,
@@ -88,16 +101,21 @@ TCP::~TCP()
 {
     if (this->ip == 0) // If I have binded anything, I have to close it.
         close(this->sock);
-    close(this->timerfd);
 }
 
 int TCP::send(const std::vector<char> &data)
 {
-    return ::sendto(this->sock, data.data(), data.size(), 0, (sockaddr *)&this->addr, sizeof(sockaddr_in));
+    Pkt p;
+    p.push_back(data);
+    return pkt_mgr::send(Pkt_wrapper(this->sock, p.data, this->addr));
 }
 
 int TCP::recv(std::vector<char> &data)
 {
-    socklen_t addr_len = sizeof(sockaddr_in);
-    return ::recvfrom(this->sock, data.data(), data.size(), 0, (sockaddr *)&this->addr, &addr_len);
+    auto p = Pkt_wrapper(this->sock, this->addr);
+    p.buf.swap(data);
+    auto ret = pkt_mgr::recv(p);
+    p.buf.swap(data);
+
+    return ret;
 }
