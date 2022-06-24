@@ -93,15 +93,13 @@ namespace detail
         ::epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &ev);
     }
 
-    void timer_update(Timer_fd timer_fd, std::chrono::milliseconds ms) noexcept
+    using namespace std::chrono;
+    //  setting ms to zero means disarm the timer
+    void timer_update(Timer_fd timer_fd, std::chrono::nanoseconds start, std::chrono::nanoseconds interval = 1000ns) noexcept
     {
-        using namespace std::chrono;
-        auto sec = duration_cast<seconds>(ms).count();
-        auto nsec = (duration_cast<nanoseconds>(ms) - ms).count();
-
         const itimerspec its = {
-            .it_interval = {.tv_sec = 0, .tv_nsec = 1000},
-            .it_value = {.tv_sec = sec, .tv_nsec = nsec},
+            .it_interval = {.tv_sec = duration_cast<seconds>(interval).count(), .tv_nsec = interval.count()},
+            .it_value = {.tv_sec = duration_cast<seconds>(start).count(), .tv_nsec = start.count()},
         };
 
         ::timerfd_settime(timer_fd, 0, &its, NULL);
