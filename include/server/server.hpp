@@ -3,8 +3,8 @@
 
 #include <stdint.h>
 #include <functional>
-#include <tou.hpp>
 #include <memory>
+#include <tou.hpp>
 #include <vector>
 
 using Routine = std::function<int(int)>;

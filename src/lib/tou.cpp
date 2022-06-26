@@ -1,106 +1,217 @@
-#include <tou.hpp>
-#include <ipaddr.hpp>
 #include <pkt_mgr.hpp>
+#include <tou.hpp>
+#include <util.hpp>
 
-#include <functional>
 #include <fcntl.h>
 #include <cstring>
-#include <numeric>
-#include <stdexcept>
-#include <array>
 
-#define FMT_HEADER_ONLY
-#include <fmt/core.h>
+#ifdef DEBUG
+#pragma message("Debug mode")
+#include <iostream>
+#endif
 
 constexpr int DEFAULT_LISTEN_NUM = 5;
 
 namespace
 {
-    namespace detail
-    {
-        template <auto N>
-        consteval auto to_array(const char (&l)[N])
-        {
-            std::array<char, N> ret{};
-            std::copy_n(l, N, ret.begin());
-            return ret;
-        }
+// You should have already binded the socket
+uint16_t get_port(int sock)
+{
+    sockaddr_in addr;
+    socklen_t len = sizeof(addr);
+    auto f = std::bind(::getsockname, sock, (sockaddr *) &addr, &len);
 
-        template <auto N, auto M, typename... Rest>
-        consteval auto cat_static_str(const std::array<char, N> a, const std::array<char, M> b, Rest... rest)
-        {
-            // Take care of the null char
-            std::array<char, N + M - 1> ret{};
-            std::copy(a.cbegin(), a.cend() - 1, ret.begin());
-            std::copy(b.cbegin(), b.cend(), ret.begin() + N - 1);
-            if constexpr (sizeof...(Rest))
-                return cat_static_str(ret, rest...);
-            else
-                return ret;
-        }
+    util::try_exec("getsockname", f, sock);
 
-        template <typename Arg>
-        consteval auto fmtstr_ph_gen()
-        {
-            return to_array("{} ");
-        }
+    return addr.sin_port;
+}
 
-        template <typename... Args>
-        consteval auto err_fmtstr_gen()
-        {
-            return cat_static_str(
-                to_array("{} to "),
-                detail::fmtstr_ph_gen<Args>()...,
-                to_array("failed: {}"));
-        }
+// Return the port number which is binded
+uint16_t bind_anony_port(int sock)
+{
+    auto addr = sockaddr_in{
+        .sin_family = AF_INET,
+        .sin_port = 0,
+        .sin_addr = INADDR_ANY,
+        .sin_zero = {0},
     };
 
-    template <typename... Args>
-    void try_exec(const char *func_name, std::function<int(void)> to_be_exec, Args &&...args)
-    {
-        int _ = to_be_exec();
-        if (_ == -1) [[unlikely]]
-        {
-            static constexpr auto to_be_gen = detail::err_fmtstr_gen<Args...>();
-            throw std::runtime_error(fmt::format(to_be_gen.data(), func_name, args..., std::strerror(_)));
-        }
-    }
+    auto binding = std::bind(::bind, sock, (sockaddr *) (&addr), sizeof(addr));
+    util::try_exec("bind", binding, 0);
 
-};
+    return get_port(sock);
+}
+
+};  // namespace
+
+namespace hand_shake
+{
+Pkt_wrapper fetch_pkt(int sock)
+{
+    auto p = Pkt_wrapper(sock);
+    pkt_mgr::recv(p);
+
+    Pkt_wrapper ret(sock);
+    ret.addr = p.addr;
+    ret.buf.swap(p.buf);
+    return ret;
+}
+
+Pkt_wrapper fetch_pkt(int sock, const sockaddr_in &addr)
+{
+    auto p = Pkt_wrapper(sock, addr);
+    pkt_mgr::recv(p);
+
+    Pkt_wrapper ret(sock, addr);
+    ret.buf.swap(p.buf);
+    return ret;
+}
+};  // namespace hand_shake
 
 // Bind the 0.0.0.0
 TCP::TCP(uint16_t port)
-    : ip{0},
-      port{::htons(port)},
-      sock{::socket(AF_INET, SOCK_DGRAM, 0)},
+    : sock{::socket(AF_INET, SOCK_DGRAM, 0)},
       addr{
           .sin_family = AF_INET,
-          .sin_port = this->port,
-          .sin_addr = this->ip,
+          .sin_port = ::htons(port),
+          .sin_addr = 0,
           .sin_zero = {0},
-      }
+      },
+      my_port{port}
 {
-    auto binding = std::bind(::bind, this->sock, (sockaddr *)(&this->addr), sizeof(sockaddr_in));
-    try_exec("bind", binding, port);
+    auto binding = std::bind(::bind, this->sock, (sockaddr *) (&this->addr),
+                             sizeof(sockaddr_in));
+    util::try_exec("bind", binding, port);
 }
 
 TCP::TCP(const std::string &ip, uint16_t port)
-    : ip{::inet_addr(ip.c_str())},
-      port{::htons(port)},
-      sock{::socket(AF_INET, SOCK_DGRAM, 0)},
+    : sock{::socket(AF_INET, SOCK_DGRAM, 0)},
       addr{
           .sin_family = AF_INET,
-          .sin_port = this->port,
-          .sin_addr = this->ip,
+          .sin_port = ::htons(port),
+          .sin_addr = ::inet_addr(ip.c_str()),
           .sin_zero = {0},
-      }
+      },
+      my_port{bind_anony_port(this->sock)}
 {
+    // Do the 3-way handshaking
+
+    // SYN
+    auto syn = Pkt_wrapper(sock, addr, sizeof(Header));
+    auto &syn_header = Pkt2header(syn);
+    syn_header.src_port = my_port;
+    syn_header.dst_port = addr.sin_port;
+    syn_header.seq = util::get_rand();
+    syn_header.ack = 0;
+    syn_header.ofst = 0;
+    syn_header.____ = 0;
+    syn_header.flag = PacketType::SYN;
+    syn_header.rwnd = 0;
+    syn_header.chksum = 0;
+    syn_header.ugptr = 0;
+    pkt_mgr::send(std::move(syn));
+
+#ifdef DEBUG
+    std::clog << "Client sent SYN to "
+              << util::big_endian::ip(syn.addr.sin_addr.s_addr) << ":"
+              << util::big_endian::port(syn.addr.sin_port)
+              << " , which seq :" << std::to_string(syn_header.seq)
+              << std::endl;
+#endif
+
+    // SYN-ACK
+    auto syn_ack = hand_shake::fetch_pkt(sock, addr);
+    const auto &remote_h = Pkt2header(syn_ack);
+    pkt_mgr::discard(syn_header.seq);  // Discard syn
+
+#ifdef DEBUG
+    std::clog << "Client got SYN-ACK from "
+              << util::big_endian::ip(syn_ack.addr.sin_addr.s_addr) << ":"
+              << util::big_endian::port(syn_ack.addr.sin_port)
+              << " , which seq: " << std::to_string(remote_h.seq) << std::endl;
+#endif
+
+    // ACK
+    auto ack = Pkt_wrapper(sock, addr, sizeof(Header));
+    auto &ack_h = Pkt2header(ack);
+    ack_h.src_port = my_port;
+    ack_h.dst_port = addr.sin_port;
+    ack_h.seq = remote_h.ack + 1;
+    ack_h.ack = remote_h.seq;
+    ack_h.ofst = 0;
+    ack_h.____ = 0;
+    ack_h.flag = PacketType::ACK;
+    ack_h.rwnd = 0;
+    ack_h.chksum = 0;
+    ack_h.ugptr = 0;
+    pkt_mgr::send(std::move(ack));
+
+#ifdef DEBUG
+    std::clog << "Client sent ACK to "
+              << util::big_endian::ip(ack.addr.sin_addr.s_addr) << ":"
+              << util::big_endian::port(ack.addr.sin_port)
+              << " , which seq :" << std::to_string(ack_h.seq) << std::endl;
+#endif
+
+    // Discard ACK immediately
+    pkt_mgr::discard(ack_h.seq);
 }
 
 TCP::~TCP()
 {
-    if (this->ip == 0) // If I have binded anything, I have to close it.
-        close(this->sock);
+    if (this->addr.sin_addr.s_addr == 0)
+        close(this->sock);  // If I have binded anything, I have to close it.
+}
+
+TCP TCP::accept()
+{
+    // 3-way handshaking
+    // Got SYN
+    auto syn = hand_shake::fetch_pkt(sock);
+    const auto &remote_h = Pkt2header(syn);
+
+#ifdef DEBUG
+    std::clog << "Server got SYN from "
+              << util::big_endian::ip(syn.addr.sin_addr.s_addr) << ":"
+              << util::big_endian::port(syn.addr.sin_port)
+              << " , which seq: " << std::to_string(remote_h.seq) << std::endl;
+#endif
+
+    // Gen SYN-ACK
+    Pkt_wrapper syn_ack(sock, syn.addr, sizeof(Header));
+    auto &syn_ack_h = Pkt2header(syn_ack);
+    syn_ack_h.src_port = my_port;
+    syn_ack_h.dst_port = remote_h.src_port;
+    syn_ack_h.seq = util::get_rand();  // new seq num
+    syn_ack_h.ack = remote_h.seq;
+    syn_ack_h.ofst = 0;
+    syn_ack_h.____ = 0;
+    syn_ack_h.flag = PacketType::SYN | PacketType::ACK;
+    syn_ack_h.rwnd = 0;
+    syn_ack_h.chksum = 0;
+    syn_ack_h.ugptr = 0;
+    pkt_mgr::send(std::move(syn_ack));
+
+#ifdef DEBUG
+    std::clog << "Sever sent SYN-ACK to "
+              << util::big_endian::ip(syn_ack.addr.sin_addr.s_addr) << ":"
+              << util::big_endian::port(syn_ack.addr.sin_port)
+              << " , witch seq: " << std::to_string(syn_ack_h.seq) << std::endl;
+#endif
+
+    // Got ACK
+    auto ack = hand_shake::fetch_pkt(sock, syn.addr);
+    pkt_mgr::discard(syn_ack_h.seq);  // Discard the syn-ack pkt
+
+#ifdef DEBUG
+    const auto &ack_h = Pkt2header(ack);
+    std::clog << "Server got ACK from "
+              << util::big_endian::ip(ack.addr.sin_addr.s_addr) << ":"
+              << util::big_endian::port(ack.addr.sin_port)
+              << " , which seq: " << std::to_string(ack_h.seq) << std::endl;
+#endif
+
+    return TCP(sock, syn.addr, syn_ack_h.seq + 1, my_port);
 }
 
 int TCP::send(const std::vector<char> &data)
