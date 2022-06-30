@@ -18,7 +18,7 @@ class Server
 public:
     Server() : Server(4095){};
     ~Server() = default;
-    Server(uint16_t port);
+    explicit Server(uint16_t port);
 
     void set_task(const Routine &f_);
     void run();

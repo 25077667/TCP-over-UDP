@@ -27,7 +27,7 @@ struct Header {
     uint16_t ugptr;
 
     Header() = default;
-    Header(const char *begin);
+    explicit Header(const char *begin);
     Header(Header &&) = default;
     ~Header() = default;
 };
@@ -35,7 +35,7 @@ struct Header {
 struct Pkt {
     std::vector<char> data;  // Contains a Header
     Pkt();                   // Reserve the header block
-    Pkt(std::vector<char> &&);
+    explicit Pkt(std::vector<char> &&);
     void push_back(const std::vector<char> &data);
 };
 

@@ -3,6 +3,7 @@
 #include <util.hpp>
 
 #include <fcntl.h>
+#include <unistd.h>
 #include <cstring>
 
 #ifdef DEBUG
@@ -159,8 +160,7 @@ TCP::TCP(const std::string &ip, uint16_t port)
 
 TCP::~TCP()
 {
-    if (this->addr.sin_addr.s_addr == 0)
-        close(this->sock);  // If I have binded anything, I have to close it.
+    close(this->sock);
 }
 
 TCP TCP::accept()
@@ -211,7 +211,7 @@ TCP TCP::accept()
               << " , which seq: " << std::to_string(ack_h.seq) << std::endl;
 #endif
 
-    return TCP(sock, syn.addr, syn_ack_h.seq + 1, my_port);
+    return TCP(::dup(sock), syn.addr, syn_ack_h.seq + 1, my_port);
 }
 
 int TCP::send(const std::vector<char> &data)

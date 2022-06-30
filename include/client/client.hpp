@@ -14,7 +14,7 @@ class Client
 
 public:
     Client() = delete;
-    Client(uint32_t ip, uint16_t port = 4095);
+    explicit Client(uint32_t ip, uint16_t port = 4095);
     ~Client() = default;
 
     void set_task(const Routine &f_);

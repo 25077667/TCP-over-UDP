@@ -21,10 +21,10 @@ class TCP
         : sock{sock}, addr{addr}, seqnum{seqnum}, my_port{my_port} {};
 
 public:
-    TCP() = default;
+    TCP() = delete;
 
     // For server ctor, it would bind automatically
-    TCP(uint16_t port);
+    explicit TCP(uint16_t port);
 
     // For client ctor
     TCP(const std::string &ip, uint16_t port);
